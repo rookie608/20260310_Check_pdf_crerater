@@ -2,35 +2,69 @@ import pandas as pd
 import glob
 import os
 import re
+import math
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
 # --- 設定項目 ---
 BASE_DIR = "/Users/suzukiarato/PycharmProjects/20260310_Check_pdf_crerater"
 INPUT_DIR = os.path.join(BASE_DIR, 'csv_files')
-OUTPUT_CSV = os.path.join(BASE_DIR, 'merged_data.csv')
-OUTPUT_PDF = os.path.join(BASE_DIR, 'check_sheet.pdf')
+OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
+OUTPUT_CSV_ALL = os.path.join(OUTPUT_DIR, 'merged_data_all.csv')
 
 FONT_NAME = 'ipaexg.ttf'
 FONT_PATH = os.path.join(BASE_DIR, FONT_NAME)
 
+# 項目名の定義
+COL_SERIAL = '通し番号'  # 新しく追加する列
+COL_ID = '受付番号'
+COL_ZIP = '元の郵便番号'
+COL_ADDR = '元の住所'
+COL_NAME = '氏名'
+COL_TICKET = 'イベントチケット'
+COL_OPT = 'イベントオプションチケット'
+COL_CHECK = 'チェックOK'
+
 
 def clean_text(text):
-    """NaN対策と不要な記号の除去"""
     if pd.isna(text) or str(text).lower() == 'nan' or str(text).strip() == '':
         return "なし"
     text = str(text)
-    # PDFエラーの原因になる制御文字を削除
     text = re.sub(r'[\u200e\u200b\u208b]', '', text)
     return text
+
+
+def extract_ticket_info(row):
+    """チケット名からカテゴリと枚数を抽出"""
+    text = str(row[COL_TICKET])
+    count = 0
+    match = re.search(r'[:：](\d+)枚', text)
+    if match:
+        count = int(match.group(1))
+
+    has_a = "参加権A" in text
+    has_b = "参加権B" in text
+    has_c = "参加権C" in text
+
+    matches = [has_a, has_b, has_c]
+    if sum(matches) == 1:
+        if has_a:
+            category = "参加権A"
+        elif has_b:
+            category = "参加権B"
+        else:
+            category = "参加権C"
+    else:
+        category = "複合・その他"
+
+    return pd.Series([category, count])
 
 
 def load_and_merge_csv(directory):
     all_files = glob.glob(os.path.join(directory, "*.csv"))
     if not all_files:
-        print("【！】csv_files フォルダにCSVファイルが見つかりません。")
+        print("【！】CSVファイルが見つかりません。")
         return None
-
     df_list = []
     for file in all_files:
         try:
@@ -41,18 +75,28 @@ def load_and_merge_csv(directory):
             df_list.append(temp_df)
             print(f"読み込み成功: {os.path.basename(file)}")
         except Exception as e:
-            print(f"【！】ファイル {file} の読み込みに失敗しました: {e}")
-
+            print(f"【！】読み込み失敗: {file} ({e})")
     return pd.concat(df_list, ignore_index=True) if df_list else None
 
 
-def create_pdf_check_sheet(df):
-    target_cols = ['受付番号', '郵便番号', '住所', '名前', 'イベントチケット', 'イベントオプションチケット']
-    for col in target_cols:
-        if col not in df.columns:
-            df[col] = "なし"
-        df[col] = df[col].apply(clean_text)
+def create_pdf_check_sheet(df, category_name):
+    if df.empty:
+        return
 
+    # レイアウト設定
+    if category_name == "複合・その他":
+        row_height = 45
+        items_per_col = 5
+        line_h = 4.0
+    else:
+        row_height = 27
+        items_per_col = 10
+        line_h = 3.6
+
+    items_per_page = items_per_col * 2
+    total_pages = math.ceil(len(df) / items_per_page)
+
+    output_path = os.path.join(OUTPUT_DIR, f"check_sheet_{category_name}.pdf")
     pdf = FPDF(orientation='P', unit='mm', format='A4')
     pdf.set_auto_page_break(auto=False)
 
@@ -60,32 +104,30 @@ def create_pdf_check_sheet(df):
         pdf.add_font('JP', '', FONT_PATH)
         pdf.add_font('JP', 'B', FONT_PATH)
     else:
-        print(f"【！】エラー: フォントが見つかりません: {FONT_PATH}")
+        print(f"【！】フォントなし: {FONT_PATH}")
         return
 
-    # 1ページ20名用 (2列 x 10行)
-    items_per_col = 10
     col_width = 90
     col_space = 10
-    row_height = 27  # 1人あたりの高さ
-    line_h = 3.6  # 行間の高さ
 
-    pdf.add_page()
-    pdf.set_font('JP', 'B', 14)
-    pdf.cell(0, 10, "チェック用名簿", align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    def add_header(title, current_page, total_p):
+        pdf.add_page()
+        pdf.set_font('JP', 'B', 14)
+        header_text = f"チェック用名簿 【{title}】 ({current_page} / {total_p} ページ)"
+        pdf.cell(0, 10, header_text, align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        return pdf.get_y()
 
-    start_y_base = pdf.get_y()
+    current_p_num = 1
+    start_y_base = add_header(category_name, current_p_num, total_pages)
 
     for i, (_, row) in enumerate(df.iterrows()):
-        item_in_page = i % (items_per_col * 2)
+        item_in_page = i % items_per_page
         col_idx = item_in_page // items_per_col
         row_idx = item_in_page % items_per_col
 
         if i > 0 and item_in_page == 0:
-            pdf.add_page()
-            pdf.set_font('JP', 'B', 14)
-            pdf.cell(0, 10, f"チェック用名簿", align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            start_y_base = pdf.get_y()
+            current_p_num += 1
+            start_y_base = add_header(category_name, current_p_num, total_pages)
 
         curr_x = 10 + (col_idx * (col_width + col_space))
         curr_y = start_y_base + (row_idx * row_height)
@@ -94,54 +136,80 @@ def create_pdf_check_sheet(df):
         pdf.set_draw_color(0)
         pdf.rect(curr_x, curr_y + 1, 5, 5)
 
+        # 通し番号 (CSVの列から取得)
+        pdf.set_xy(curr_x, curr_y + 6)
+        pdf.set_font('JP', '', 7)
+        pdf.cell(5, 4, str(row[COL_SERIAL]), align='C')
+
         inner_x = curr_x + 7
         content_w = col_width - 8
 
         # 2. 受付番号（太字）
         pdf.set_xy(inner_x, curr_y)
         pdf.set_font('JP', 'B', 9)
-        pdf.cell(content_w, line_h, f"【{row['受付番号']}】", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(content_w, line_h, f"【{row[COL_ID]}】", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # 3. 郵便番号 & 名前（ラベルなし、間にスペースを確保）
+        # 3. 郵便番号 & 氏名
         pdf.set_x(inner_x)
         pdf.set_font('JP', '', 8.5)
-        # 郵便番号と名前の間に全角スペース2つ分程度の隙間を挿入
-        pdf.cell(content_w, line_h, f"〒{row['郵便番号']}    {row['名前']}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(content_w, line_h, f"〒{row[COL_ZIP]}    {row[COL_NAME]}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # 4. 住所（ラベルなし）
-        if row['住所'] != "なし":
-            pdf.set_x(inner_x)
-            pdf.set_font('JP', '', 7)
-            pdf.multi_cell(content_w, line_h, row['住所'])
+        pdf.set_font('JP', '', 7.5 if category_name == "複合・その他" else 7)
+        for col in [COL_ADDR, COL_TICKET, COL_OPT]:
+            val = clean_text(row[col])
+            if val != "なし":
+                pdf.set_x(inner_x)
+                pdf.multi_cell(content_w, line_h, val)
 
-        # 5. チケット情報（ラベルなし）
-        if row['イベントチケット'] != "なし":
-            pdf.set_x(inner_x)
-            pdf.set_font('JP', '', 7)
-            pdf.multi_cell(content_w, line_h, row['イベントチケット'])
-
-        # 6. オプション情報（ラベルなし）
-        if row['イベントオプションチケット'] != "なし":
-            pdf.set_x(inner_x)
-            pdf.multi_cell(content_w, line_h, row['イベントオプションチケット'])
-
-        # 7. 区切り線
         pdf.set_draw_color(220, 220, 220)
         pdf.line(curr_x, curr_y + row_height - 1.5, curr_x + col_width, curr_y + row_height - 1.5)
 
-    pdf.output(OUTPUT_PDF)
-    print(f"✅ PDFを出力しました: {OUTPUT_PDF} (20名/2列/ラベルなし版)")
+    pdf.output(output_path)
+    print(f"✅ PDFを出力しました: {os.path.basename(output_path)}")
 
 
 def main():
-    if not os.path.exists(INPUT_DIR):
-        os.makedirs(INPUT_DIR)
-        print(f"フォルダを作成しました。{INPUT_DIR} にCSVを入れてください。")
-        return
+    os.makedirs(INPUT_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     df = load_and_merge_csv(INPUT_DIR)
     if df is not None:
-        df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
-        create_pdf_check_sheet(df)
+        # チェックOKフィルタ
+        if COL_CHECK in df.columns:
+            df = df[df[COL_CHECK].astype(str).str.upper() == 'TRUE'].copy()
+
+        # 項目補完
+        pdf_cols = [COL_ID, COL_ZIP, COL_ADDR, COL_NAME, COL_TICKET, COL_OPT]
+        for col in pdf_cols:
+            if col not in df.columns:
+                df[col] = "なし"
+
+        # 特徴抽出（カテゴリと枚数）
+        df[['カテゴリ', '枚数']] = df.apply(extract_ticket_info, axis=1)
+
+        # 全データ統合CSV出力（ソートなしの生データ）
+        df.to_csv(OUTPUT_CSV_ALL, index=False, encoding='utf-8-sig')
+
+        categories = ["参加権A", "参加権B", "参加権C", "複合・その他"]
+        for cat in categories:
+            sub_df = df[df['カテゴリ'] == cat].copy()
+            if not sub_df.empty:
+                # 1. カテゴリごとのソート
+                if cat == "参加権C":
+                    sub_df = sub_df.sort_values(by=[COL_ID], ascending=[True])
+                else:
+                    sub_df = sub_df.sort_values(by=['枚数', COL_ID], ascending=[False, True])
+
+                # 2. 通し番号列を先頭に追加（1から開始）
+                sub_df.insert(0, COL_SERIAL, range(1, len(sub_df) + 1))
+
+                # 3. CSV出力
+                cat_csv_path = os.path.join(OUTPUT_DIR, f"data_{cat}.csv")
+                sub_df.to_csv(cat_csv_path, index=False, encoding='utf-8-sig')
+                print(f"✅ CSVを出力しました: {os.path.basename(cat_csv_path)}")
+
+                # 4. PDF出力
+                create_pdf_check_sheet(sub_df, cat)
 
 
 if __name__ == "__main__":
