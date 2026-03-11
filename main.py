@@ -2,9 +2,10 @@
 ================================================================================
 【イベントチェック名簿作成システム - 最終仕様】
 
-1. 自動フィルタリング:
-   - 「チェックOK」列が TRUE（大文字小文字問わず）の人のみ名簿化。
-   - 【追加】チェックOKでなかった人は「excluded_data_check_not_ok.csv」として一括出力。
+1. 自動フィルタリング（2段階）:
+   - 【新規】「対象外」列が TRUE のデータを抽出し「excluded_target_out.csv」へ出力。
+   - 【新規】「チェックOK」列が TRUE でないデータを抽出し「excluded_check_not_ok.csv」へ出力。
+   - 上記いずれにも該当しない（名簿掲載対象）のみを処理。
 2. 賢いカテゴリ分け:
    - 参加権A・B・Cを判定。複数所持や該当なしは「複合・その他」へ自動集約。
 3. こだわりの並び替え:
@@ -31,25 +32,27 @@ from fpdf.enums import XPos, YPos
 BASE_DIR = "/Users/suzukiarato/PycharmProjects/20260310_Check_pdf_crerater"
 INPUT_DIR = os.path.join(BASE_DIR, 'csv_files')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
-OUTPUT_CSV_ALL = os.path.join(OUTPUT_DIR, 'merged_data_all.csv')
-OUTPUT_CSV_EXCLUDED = os.path.join(OUTPUT_DIR, 'excluded_data_check_not_ok.csv') # 除外データ用
 
-# フォント設定
+# 出力ファイルパスの定義
+OUTPUT_CSV_ALL    = os.path.join(OUTPUT_DIR, 'merged_data_all.csv')
+OUTPUT_CSV_NOT_OK = os.path.join(OUTPUT_DIR, 'excluded_check_not_ok.csv') # チェックOK=FALSE用
+OUTPUT_CSV_TARGET = os.path.join(OUTPUT_DIR, 'excluded_target_out.csv')   # 対象外=TRUE用
+
 FONT_NAME = 'ipaexg.ttf'
 FONT_PATH = os.path.join(BASE_DIR, FONT_NAME)
 
 # 項目名定義
-COL_SERIAL = '通し番号'
-COL_ID     = '受付番号'
-COL_ZIP    = '元の郵便番号'
-COL_ADDR   = '元の住所'
-COL_NAME   = '氏名'
-COL_TICKET = 'イベントチケット'
-COL_OPT    = 'イベントオプションチケット'
-COL_CHECK  = 'チェックOK'
+COL_SERIAL  = '通し番号'
+COL_ID      = '受付番号'
+COL_ZIP     = '元の郵便番号'
+COL_ADDR    = '元の住所'
+COL_NAME    = '氏名'
+COL_TICKET  = 'イベントチケット'
+COL_OPT     = 'イベントオプションチケット'
+COL_CHECK   = 'チェックOK'
+COL_EXCLUDE = '対象外'
 
 def clean_text(text):
-    """NaN対策と制御文字除去"""
     if pd.isna(text) or str(text).lower() == 'nan' or str(text).strip() == '':
         return "なし"
     text = str(text)
@@ -57,7 +60,6 @@ def clean_text(text):
     return text
 
 def extract_ticket_info(row):
-    """チケット名からカテゴリと枚数を抽出"""
     text = str(row[COL_TICKET])
     count = 0
     match = re.search(r'[:：](\d+)枚', text)
@@ -97,11 +99,9 @@ def load_and_merge_csv(directory):
     return pd.concat(df_list, ignore_index=True) if df_list else None
 
 def create_pdf_check_sheet(df, category_name):
-    """PDF生成エンジン"""
     if df.empty:
         return
 
-    # レイアウト切り替え
     if category_name == "複合・その他":
         row_height = 45
         items_per_col = 5
@@ -189,42 +189,49 @@ def main():
 
     df = load_and_merge_csv(INPUT_DIR)
     if df is not None:
-        # --- 1. チェックOKでない人を抽出・保存 ---
-        if COL_CHECK in df.columns:
-            # TRUE以外を抽出
-            df_excluded = df[df[COL_CHECK].astype(str).str.upper() != 'TRUE'].copy()
-            if not df_excluded.empty:
-                df_excluded.to_csv(OUTPUT_CSV_EXCLUDED, index=False, encoding='utf-8-sig')
-                print(f"✅ チェック未完了データを保存しました: {os.path.basename(OUTPUT_CSV_EXCLUDED)} ({len(df_excluded)}件)")
+        # --- 1. 「対象外」フィルタと出力 ---
+        if COL_EXCLUDE in df.columns:
+            # TRUE（除外対象）を抽出して保存
+            df_target_out = df[df[COL_EXCLUDE].astype(str).str.upper() == 'TRUE'].copy()
+            if not df_target_out.empty:
+                df_target_out.to_csv(OUTPUT_CSV_TARGET, index=False, encoding='utf-8-sig')
+                print(f"✅ 対象外データを保存しました: {os.path.basename(OUTPUT_CSV_TARGET)} ({len(df_target_out)}件)")
 
-            # TRUEのみに絞り込む（名簿用）
+            # TRUEでない人だけを次に進める
+            df = df[df[COL_EXCLUDE].astype(str).str.upper() != 'TRUE'].copy()
+
+        # --- 2. 「チェックOK」フィルタと出力 ---
+        if COL_CHECK in df.columns:
+            # TRUEでない（未完了）人を抽出して保存
+            df_check_not_ok = df[df[COL_CHECK].astype(str).str.upper() != 'TRUE'].copy()
+            if not df_check_not_ok.empty:
+                df_check_not_ok.to_csv(OUTPUT_CSV_NOT_OK, index=False, encoding='utf-8-sig')
+                print(f"✅ チェック未完了データを保存しました: {os.path.basename(OUTPUT_CSV_NOT_OK)} ({len(df_check_not_ok)}件)")
+
+            # TRUEの人だけを名簿対象にする
             df = df[df[COL_CHECK].astype(str).str.upper() == 'TRUE'].copy()
 
-        # --- 2. データ補完 ---
+        # --- 3. データ補完と全統合CSV保存 ---
         required_cols = [COL_ID, COL_ZIP, COL_ADDR, COL_NAME, COL_TICKET, COL_OPT]
         for col in required_cols:
             if col not in df.columns:
                 df[col] = "なし"
 
-        # --- 3. 特徴抽出 ---
         df[['カテゴリ', '枚数']] = df.apply(extract_ticket_info, axis=1)
         df.to_csv(OUTPUT_CSV_ALL, index=False, encoding='utf-8-sig')
 
-        # --- 4. カテゴリ別出力 ---
+        # --- 4. カテゴリ別出力フロー ---
         categories = ["参加権A", "参加権B", "参加権C", "複合・その他"]
         for cat in categories:
             sub_df = df[df['カテゴリ'] == cat].copy()
             if not sub_df.empty:
-                # ソート
                 if cat == "参加権C":
                     sub_df = sub_df.sort_values(by=[COL_ID], ascending=[True])
                 else:
                     sub_df = sub_df.sort_values(by=['枚数', COL_ID], ascending=[False, True])
 
-                # 通し番号付与
                 sub_df.insert(0, COL_SERIAL, range(1, len(sub_df) + 1))
 
-                # 個別書き出し
                 cat_csv_path = os.path.join(OUTPUT_DIR, f"data_{cat}.csv")
                 sub_df.to_csv(cat_csv_path, index=False, encoding='utf-8-sig')
                 create_pdf_check_sheet(sub_df, cat)
